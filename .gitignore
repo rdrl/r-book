@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+*.bak*
+*.tmp
+.hist/
+data/config.json
+data/reading_state.json
+data/library_cache.json
+data/covers/
+.DS_Store
+data/

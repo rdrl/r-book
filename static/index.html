@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#f5f5f7">
+  <title>R-Book · Library</title>
+  <link rel="stylesheet" href="/static/css/style.css?v=20261115wrap">
+  <script src="https://unpkg.com/vue@3.4.38/dist/vue.global.prod.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+  <div class="app-shell">
+
+    <!-- ===================== 左侧磨砂导航栏 ===================== -->
+    <div class="sidebar-scrim" v-if="sidebarOpen" @click="sidebarOpen = false"></div>
+    <aside class="sidebar" :class="{ open: sidebarOpen }">
+      <div class="sidebar-search">
+        <svg class="search-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><line x1="12.6" y1="12.6" x2="17" y2="17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input id="search-input" type="search" v-model="searchQuery" placeholder="Search" autocomplete="off">
+      </div>
+
+      <nav class="sidebar-scroll">
+        <div class="nav-group-title">Library</div>
+        <ul class="nav-list">
+          <li v-for="item in libraryNav" :key="item.key">
+            <button class="nav-item" :class="{ active: view === 'library' && activeFilter === item.key }" @click="selectFilter(item.key)">
+              <span class="nav-icon">{{ item.icon }}</span>
+              <span class="nav-label">{{ item.label }}</span>
+              <span class="nav-count" v-if="filterCounts[item.key] !== undefined">{{ filterCounts[item.key] }}</span>
+            </button>
+          </li>
+          <li>
+            <button class="nav-item" :class="{ active: view === 'folders' && browseRoot === '' }" @click="openFolders('')">
+              <span class="nav-icon">🗂️</span>
+              <span class="nav-label">Folders</span>
+            </button>
+          </li>
+        </ul>
+
+        <div class="nav-group-title">My Collections</div>
+        <ul class="nav-list">
+          <li v-for="col in collections" :key="col">
+            <button class="nav-item" :class="{ active: view === 'folders' && browseRoot === col }" @click="openFolders(col)">
+              <span class="nav-icon">📁</span>
+              <span class="nav-label">{{ col }}</span>
+            </button>
+          </li>
+          <li v-if="collections.length === 0" class="nav-empty">暂无子文件夹</li>
+        </ul>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="user-row">
+          <div class="avatar">RB</div>
+          <div class="user-name">Rric Brook</div>
+          <button class="icon-btn" :title="isDark ? '切换浅色' : '切换深色'" @click="toggleDark">{{ isDark ? '☀️' : '🌙' }}</button>
+        </div>
+        <div class="footer-actions">
+          <button class="footer-btn" @click="openSettings">⚙️ 设置 (Settings)</button>
+          <button class="footer-btn" :disabled="syncing" @click="triggerSync">{{ syncing ? '⏳ 同步中…' : '🔄 同步进度' }}</button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ===================== 主内容区 ===================== -->
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-btn hamburger" @click="sidebarOpen = !sidebarOpen" aria-label="菜单">☰</button>
+        <div class="topbar-title">
+          <h1>{{ pageTitle }}</h1>
+          <span class="topbar-sub">{{ pageSubtitle }}</span>
+        </div>
+        <div class="topbar-actions">
+          <span class="scan-pill" v-if="scanStatus.scanning">扫描中 · {{ scanStatus.found_books }} 本</span>
+          <span class="mode-pill" :class="config.cloud_restricted_mode ? 'mode-cloud' : 'mode-local'" @click="openSettings">
+            {{ config.cloud_restricted_mode ? '☁️ 云盘受限' : '⚡ 本地满血' }}
+          </span>
+          <button class="icon-btn" title="手动重新扫描并刷新书库" :disabled="loading" @click="refreshLibrary">⟳</button>
+        </div>
+      </header>
+
+      <!-- 实时目录面包屑 -->
+      <div class="breadcrumbs" v-if="view === 'folders'">
+        <template v-for="(crumb, idx) in browseData.breadcrumbs" :key="crumb.path + idx">
+          <span class="crumb-sep" v-if="idx > 0">›</span>
+          <button class="crumb" :class="{ current: idx === browseData.breadcrumbs.length - 1 }" @click="browse(crumb.path)">{{ crumb.name }}</button>
+        </template>
+      </div>
+
+      <section class="content" ref="libraryContentEl" @scroll.passive="onLibraryScroll">
+        <div class="loading-state" v-if="loading && visibleBooks.length === 0 && visibleDirs.length === 0">
+          <div class="spinner"></div>
+          <span>正在载入资料库…</span>
+        </div>
+
+        <template v-else-if="visibleBooks.length > 0 || visibleDirs.length > 0">
+          <div class="book-grid">
+            <!-- 文件夹卡片 -->
+            <article class="folder-card" v-for="dir in visibleDirs" :key="'dir:' + dir.path" @click="browse(dir.path)">
+              <div class="folder-visual">
+                <div class="folder-tab"></div>
+                <div class="folder-body"><span>{{ dir.name }}</span></div>
+              </div>
+              <div class="card-caption">{{ dir.name }}</div>
+            </article>
+
+            <!-- 书籍卡片 -->
+            <article class="book-card" v-for="book in visibleBooks" :key="book.rel_key" @click="openBook(book)">
+              <div class="book-cover" :class="'cover-' + coverTheme(book)">
+                <img v-if="book.has_cover && !coverFailed[book.rel_key]" class="real-cover" :src="book.cover_url" loading="lazy" :alt="book.title" @error="coverFailed[book.rel_key] = true">
+                <div v-else class="faux-cover">
+                  <template v-if="coverTheme(book) === 'classic'">
+                    <div class="classic-frame">
+                      <div class="classic-title">{{ shortTitle(book.title, 9) }}</div>
+                      <div class="classic-seal">{{ sealChar(book) }}</div>
+                    </div>
+                  </template>
+                  <template v-else-if="coverTheme(book) === 'amber'">
+                    <div class="amber-top">{{ book.category }}</div>
+                    <div class="amber-title">{{ shortTitle(book.title, 22) }}</div>
+                    <div class="amber-rule"></div>
+                    <div class="amber-sub">{{ book.format }} · R-Book</div>
+                  </template>
+                  <template v-else-if="coverTheme(book) === 'navy'">
+                    <div class="navy-bar"></div>
+                    <div class="navy-title">{{ shortTitle(book.title, 24) }}</div>
+                    <div class="navy-sub">{{ book.category }}</div>
+                    <div class="navy-chart"><i></i><i></i><i></i><i></i><i></i></div>
+                  </template>
+                  <template v-else>
+                    <div class="eng-header"><span>{{ book.format }}</span><span>REV 1.0</span></div>
+                    <div class="eng-title">{{ shortTitle(book.title, 26) }}</div>
+                    <div class="eng-grid"></div>
+                    <div class="eng-footer">{{ book.category }}</div>
+                  </template>
+                </div>
+                <!-- 封面右上角书签数量小角标 -->
+                <span class="cover-bookmark-ribbon" v-if="book.bookmarks && book.bookmarks.length > 0" :title="book.bookmarks.length + ' 个书签'">
+                  🔖 {{ book.bookmarks.length }}
+                </span>
+              </div>
+
+              <div class="book-status">
+                <span class="badge-new" v-if="isNew(book)">NEW</span>
+                <span class="badge-want" v-else-if="book.status === 'want' && !book.progress">想读</span>
+                <span class="badge-progress" v-else>{{ progressLabel(book) }}</span>
+                <span class="status-right">
+                  <span class="storage-icon" :title="config.cloud_restricted_mode ? '云盘文件' : '本地磁盘'">
+                    <svg v-if="config.cloud_restricted_mode" viewBox="0 0 24 16"><path d="M6.5 14.5h11a4 4 0 0 0 .6-7.95A5.5 5.5 0 0 0 7.4 5.1 4.7 4.7 0 0 0 6.5 14.5z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+                    <svg v-else viewBox="0 0 24 16"><rect x="2.5" y="3" width="19" height="10" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="17.5" cy="8" r="1.2" fill="currentColor"/></svg>
+                  </span>
+                  <button class="more-btn" @click.stop="toggleMenu(book)" aria-label="更多">•••</button>
+                </span>
+                <div class="book-menu" v-if="menuKey === book.rel_key" @click.stop>
+                  <button @click="setStatus(book, 'want')">📌 加入 Want to Read</button>
+                  <button @click="setStatus(book, 'finished')">✅ 标记为 Finished</button>
+                  <button @click="setStatus(book, 'new')">✨ 重置为 NEW</button>
+                  <button @click="openContainingFolder(book)">📂 打开所在文件夹</button>
+                </div>
+              </div>
+              <div class="card-caption" :title="book.rel_key">{{ book.title }}</div>
+            </article>
+          </div>
+
+          <!-- 2 万册大书库滚动懒加载哨兵与“加载更多”控制区 -->
+          <div class="load-more-zone" ref="loadMoreSentinelEl" v-if="view === 'library'">
+            <button
+              v-if="pagination.hasMore"
+              class="load-more-btn"
+              :disabled="loadingMore"
+              @click="loadNextPage">
+              <span class="spinner small" v-if="loadingMore"></span>
+              <span>{{ loadingMore ? '正在加载更多书籍…' : ('加载更多 (' + visibleBooks.length + ' / ' + pagination.total + ' 本)') }}</span>
+            </button>
+            <div v-else-if="pagination.total > pagination.pageSize" class="load-more-end">
+              已加载全部 {{ pagination.total }} 本藏书
+            </div>
+          </div>
+        </template>
+
+        <div class="empty-state" v-else>
+          <div class="empty-icon">📚</div>
+          <div class="empty-title">{{ searchQuery ? '没有匹配的书籍' : '这里还没有书' }}</div>
+          <div class="empty-sub">在「⚙️ 设置」中从服务器添加媒体文件夹后刷新书库。</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ===================== Apple Books Zen Reader 沉浸式阅读器 ===================== -->
+  <transition name="reader-zoom">
+    <div class="reader" v-if="reader.open" :class="['reader-theme-' + prefs.theme, 'reader-font-' + prefs.font]" :style="readerStyle">
+      <!-- 顶部悬浮毛玻璃工具栏 -->
+      <header class="reader-toolbar" :class="{ 'toolbar-hidden': !reader.toolbarVisible }" @click.stop>
+        <div class="rt-side rt-left">
+          <button class="rt-btn" @click="closeReader" title="返回书架">‹ 书架</button>
+          <button class="rt-btn" :class="{ active: reader.tocOpen && reader.drawerTab === 'toc' }" @click.stop="openDrawerTab('toc')" title="目录与书签">☰</button>
+          <button class="rt-btn" :class="{ active: reader.tocOpen && reader.drawerTab === 'bookmarks' }" @click.stop="openDrawerTab('bookmarks')" title="查看本书书签列表" v-if="reader.bookmarks.length > 0">
+            🔖 {{ reader.bookmarks.length }}
+          </button>
+        </div>
+        <div class="rt-center">
+          <div class="rt-title">{{ reader.title }}</div>
+          <div class="rt-sub">{{ readerSubtitle }}</div>
+        </div>
+        <div class="rt-side rt-right">
+          <template v-if="reader.kind === 'epub'">
+            <button class="rt-btn" @click="toggleEpubSpread" :title="prefs.epubSpread === 'auto' ? '切换单页模式' : '切换双页并排'">
+              {{ prefs.epubSpread === 'auto' ? '📖 双页' : '📄 单页' }}
+            </button>
+          </template>
+          <template v-if="reader.kind === 'pdf'">
+            <button class="rt-btn" @click="adjustPdfZoom(-0.2)" title="缩小" :disabled="reader.pdfNativeMode">－</button>
+            <span class="rt-zoom-label" v-if="!reader.pdfNativeMode">{{ Math.round(reader.pdfScale * 100) }}%</span>
+            <button class="rt-btn" @click="adjustPdfZoom(0.2)" title="放大" :disabled="reader.pdfNativeMode">＋</button>
+            <button class="rt-btn" :class="{ active: isPdfNightInverted }" @click="togglePdfInvert" title="PDF 夜间护眼反相滤镜">🌗 护眼</button>
+            <button class="rt-btn" :class="{ active: reader.pdfNativeMode }" @click="togglePdfNativeMode" title="切换浏览器原生 PDF 预览兜底">
+              {{ reader.pdfNativeMode ? '⚡ 流式画布' : '🌐 原生预览' }}
+            </button>
+          </template>
+          <!-- CHM 原版网页模式：保留 CHM 自带图片导航主页与超链接结构 -->
+          <template v-if="reader.book && reader.book.ext === 'chm'">
+            <template v-if="reader.chmWeb">
+              <button class="rt-btn" @click="chmGoBack" :disabled="!reader.chmCanBack" title="后退到上一个网页">‹<span class="rt-label"> 后退</span></button>
+              <button class="rt-btn" @click="chmGoHome" title="回到 CHM 主页">🏠<span class="rt-label"> 主页</span></button>
+            </template>
+            <button class="rt-btn" :class="{ active: reader.chmWeb }" @click="toggleChmWeb"
+              :title="reader.chmWeb ? '切换为纯文本排版阅读' : '以原版网页方式浏览（含图片导航主页）'">
+              {{ reader.chmWeb ? '📄' : (reader.chmLoading && !reader.chmInfo ? '⏳' : '🌐') }}<span class="rt-label">{{ reader.chmWeb ? ' 纯文本' : ' 原版网页' }}</span>
+            </button>
+          </template>
+          <!-- Apple Books 级一键添加/移除书签按钮（已加书签高亮为苹果红实心） -->
+          <button
+            v-if="!reader.chmWeb"
+            class="rt-btn rt-bookmark-btn"
+            :class="{ 'is-bookmarked': !!currentPositionBookmark }"
+            @click.stop="toggleCurrentBookmark"
+            :title="currentPositionBookmark ? '移除当前位置书签' : '添加当前位置书签'"
+            aria-label="书签">
+            <svg viewBox="0 0 20 24" class="bookmark-svg" aria-hidden="true">
+              <path
+                d="M4 2.5h12A1.5 1.5 0 0 1 17.5 4v17.2a.5.5 0 0 1-.82.38L10 16.2l-6.68 5.38a.5.5 0 0 1-.82-.38V4A1.5 1.5 0 0 1 4 2.5z"
+                :fill="currentPositionBookmark ? 'currentColor' : 'none'"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </button>
+          <button class="rt-btn rt-aa" v-if="!reader.chmWeb" :class="{ active: reader.aaOpen }" @click.stop="reader.aaOpen = !reader.aaOpen" title="排版">Aa</button>
+          <button class="rt-btn" @click="toggleFullscreen" :title="reader.isFullscreen ? '退出全屏' : '全屏'">{{ reader.isFullscreen ? '⤡' : '⤢' }}</button>
+        </div>
+      </header>
+
+      <!-- 自动精准续读恢复胶囊提示（2.5 秒优雅浮动展示） -->
+      <transition name="resume-pill-fade">
+        <div class="resume-capsule" v-if="reader.resumeBanner" @click="reader.resumeBanner = false">
+          <span class="resume-dot"></span>
+          <span>{{ reader.resumeBannerText || '已为您自动定位至上次阅读位置' }}</span>
+        </div>
+      </transition>
+
+      <!-- Aa 排版控制面板 -->
+      <div class="aa-panel" v-if="reader.aaOpen" @click.stop>
+        <div class="aa-themes">
+          <button v-for="t in readerThemes" :key="t.key" class="theme-swatch" :class="['swatch-' + t.key, { active: prefs.theme === t.key }]" @click="prefs.theme = t.key">
+            <span class="swatch-aa">Aa</span>
+            <span class="swatch-label">{{ t.label }}</span>
+          </button>
+        </div>
+        <div class="aa-row">
+          <div class="aa-label">字体</div>
+          <div class="seg">
+            <button v-for="f in readerFonts" :key="f.key" :class="['seg-' + f.key, { active: prefs.font === f.key }]" @click="prefs.font = f.key">{{ f.label }}</button>
+          </div>
+        </div>
+        <div class="aa-row">
+          <div class="aa-label">字号</div>
+          <div class="slider-row">
+            <button class="step-btn small-a" @click="adjustFontSize(-1)" aria-label="减小字号">A</button>
+            <input type="range" min="15" max="30" step="1" v-model.number="prefs.fontSize">
+            <button class="step-btn big-a" @click="adjustFontSize(1)" aria-label="增大字号">A</button>
+            <span class="aa-value">{{ prefs.fontSize }}px</span>
+          </div>
+        </div>
+        <div class="aa-row">
+          <div class="aa-label">行高</div>
+          <div class="slider-row">
+            <span class="aa-mini">紧</span>
+            <input type="range" min="1.5" max="2.2" step="0.1" v-model.number="prefs.lineHeight">
+            <span class="aa-mini">松</span>
+            <span class="aa-value">{{ Number(prefs.lineHeight).toFixed(1) }}</span>
+          </div>
+        </div>
+        <div class="aa-row" v-if="reader.kind === 'text' || reader.kind === 'md'">
+          <div class="aa-label">翻页</div>
+          <div class="seg">
+            <button :class="{ active: prefs.layoutMode === 'paged' }" @click="prefs.layoutMode = 'paged'">左右翻页</button>
+            <button :class="{ active: prefs.layoutMode === 'scroll' }" @click="prefs.layoutMode = 'scroll'">上下滚动</button>
+          </div>
+        </div>
+        <div class="aa-row" v-if="reader.kind === 'epub'">
+          <div class="aa-label">翻页</div>
+          <div class="seg">
+            <button :class="{ active: prefs.epubSpread === 'auto' }" @click="setEpubSpread('auto')">双页并排</button>
+            <button :class="{ active: prefs.epubSpread === 'none' }" @click="setEpubSpread('none')">单页视图</button>
+          </div>
+        </div>
+        <div class="aa-row" v-else>
+          <div class="aa-label">版心</div>
+          <div class="seg">
+            <button v-for="w in readerWidthOptions" :key="w.key" :class="{ active: prefs.width === w.key }" @click="prefs.width = w.key">{{ w.label }}</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 左侧「目录 (TOC) | 书签 (Bookmarks)」双标签页滑出抽屉 -->
+      <div class="toc-scrim" v-if="reader.tocOpen" @click="reader.tocOpen = false"></div>
+      <aside class="toc-drawer" :class="{ open: reader.tocOpen }" @click.stop>
+        <div class="drawer-tabs">
+          <button
+            class="drawer-tab"
+            :class="{ active: reader.drawerTab === 'toc' }"
+            @click="reader.drawerTab = 'toc'">
+            <span>目录 (TOC)</span>
+            <span class="drawer-tab-badge">{{ tocTotalCount }}</span>
+          </button>
+          <button
+            class="drawer-tab"
+            :class="{ active: reader.drawerTab === 'bookmarks' }"
+            @click="reader.drawerTab = 'bookmarks'">
+            <span>书签 (Bookmarks)</span>
+            <span class="drawer-tab-badge" :class="{ 'has-bm': reader.bookmarks.length > 0 }">{{ reader.bookmarks.length }}</span>
+          </button>
+        </div>
+
+        <!-- 选项卡 1：目录 (TOC) -->
+        <template v-if="reader.drawerTab === 'toc'">
+          <input class="toc-search" type="search" v-model="reader.tocQuery" :placeholder="reader.kind === 'md' ? '搜索大纲标题…' : '搜索章节或页码…'">
+          <div class="toc-list">
+            <template v-if="reader.chmWeb">
+              <button v-for="(item, idx) in filteredChmToc" :key="'chm-toc-' + idx" class="toc-item chm-toc-item"
+                :class="{ active: item.key && reader.chmPage === item.key, 'chm-toc-group': !item.key }"
+                :style="{ paddingLeft: (10 + (item.level - 1) * 16) + 'px' }"
+                :disabled="!item.key"
+                @click="chmNavigate(item.key, item.anchor)">
+                <span class="toc-text">{{ item.title }}</span>
+              </button>
+            </template>
+            <template v-else-if="reader.kind === 'md'">
+              <button v-for="h in filteredMdToc" :key="h.id" class="toc-item" :class="['toc-level-' + h.level, { active: reader.activeHeading === h.id }]" @click="scrollToHeading(h.id)">{{ h.text }}</button>
+            </template>
+            <template v-else-if="reader.kind === 'epub'">
+              <button v-for="(item, idx) in filteredEpubToc" :key="item.href + ':' + idx" class="toc-item" :class="['toc-level-' + item.level, { active: reader.epubCurrentHref === item.href }]" @click="goEpubHref(item.href)">
+                <span class="toc-index">{{ idx + 1 }}</span>
+                <span class="toc-text">{{ item.label }}</span>
+              </button>
+            </template>
+            <template v-else-if="reader.kind === 'pdf'">
+              <button v-for="(item, idx) in filteredPdfToc" :key="'pdf-toc-' + idx" class="toc-item" :class="{ active: reader.current === item.page }" @click="goPdfPage(item.page)">
+                <span class="toc-index">P.{{ item.page }}</span>
+                <span class="toc-text">{{ item.title }}</span>
+              </button>
+            </template>
+            <template v-else>
+              <button v-for="ch in filteredChapters" :key="ch.index" class="toc-item" :class="{ active: reader.current === ch.index }" @click="goChapter(ch.index)">
+                <span class="toc-index">{{ ch.index + 1 }}</span>
+                <span class="toc-text">{{ ch.title }}</span>
+              </button>
+            </template>
+            <div class="toc-empty" v-if="reader.chmWeb ? filteredChmToc.length === 0 : tocFilteredCount === 0">没有匹配的目录条目</div>
+          </div>
+        </template>
+
+        <!-- 选项卡 2：书签 (Bookmarks) -->
+        <template v-else>
+          <div class="bookmarks-header-bar">
+            <span class="bookmarks-sub">按添加时间倒序排列</span>
+            <button class="add-bm-inline-btn" @click="toggleCurrentBookmark">
+              {{ currentPositionBookmark ? '移除当前页书签' : '＋ 添加当前页书签' }}
+            </button>
+          </div>
+          <div class="toc-list bookmark-list">
+            <div
+              v-for="bm in sortedBookmarks"
+              :key="bm.id"
+              class="bookmark-card"
+              :class="{ active: currentPositionBookmark && currentPositionBookmark.id === bm.id }"
+              @click="jumpToBookmark(bm)">
+              <div class="bm-card-top">
+                <span class="bm-badge">🔖 {{ bm.label || bm.title || '书签' }}</span>
+                <span class="bm-progress" v-if="bm.progress !== undefined">{{ Math.round(bm.progress) }}%</span>
+                <button class="bm-del-btn" title="删除此书签" @click.stop="removeBookmark(bm)" aria-label="删除书签">✕</button>
+              </div>
+              <div class="bm-snippet" v-if="bm.snippet">{{ bm.snippet }}</div>
+              <div class="bm-time">{{ formatBookmarkTime(bm.created_at) }}</div>
+            </div>
+            <div class="toc-empty" v-if="sortedBookmarks.length === 0">
+              <div style="font-size: 26px; margin-bottom: 6px;">🔖</div>
+              <div>暂无书签</div>
+              <div style="margin-top: 4px; opacity: 0.75;">点击右上角书签图标即可随时记录阅读位置</div>
+            </div>
+          </div>
+        </template>
+      </aside>
+
+      <!-- 沉浸翻页眉标（隐藏顶部工具栏时轻柔展示章节名） -->
+      <div class="paged-running-header" v-if="isPaged && !reader.toolbarVisible && !reader.loading && !reader.error && !reader.chmWeb">{{ readerSubtitle }}</div>
+
+      <!-- CHM 原版网页模式：iframe 原样承载 CHM 内的 HTML / 图片 / 超链接（覆盖在纯文本阅读区之上） -->
+      <div class="chm-stage" v-if="reader.chmWeb">
+        <iframe ref="chmFrameEl" name="rbook-chm" class="chm-frame" @load="onChmFrameLoad" title="CHM 原版网页"></iframe>
+      </div>
+
+      <!-- 正文阅读区（TXT / UMD / MD：默认自适应分页 + 左右划屏翻页，支持切换上下滚动） -->
+      <div class="reader-scroll" ref="readerScrollEl" :class="{ paged: isPaged }" v-show="reader.kind === 'text' || reader.kind === 'md'" @scroll.passive="onReaderScroll" @click="onReaderStageTap"
+        @touchstart.passive="onReaderTouchStart" @touchend="onReaderTouchEnd" @touchcancel="onReaderTouchCancel">
+        <div class="reader-status" v-if="reader.loading && !reader.content && !reader.mdHtml">
+          <div class="spinner"></div><span>正在打开…</span>
+        </div>
+        <div class="reader-status error" v-else-if="reader.error">
+          <span>{{ reader.error }}</span>
+          <button class="secondary-btn" @click="retryReader">重试</button>
+        </div>
+
+        <article class="reader-page text-page" v-if="reader.kind === 'text' && reader.content && !reader.error">
+          <h2 class="chapter-heading">{{ reader.chapterTitle }}</h2>
+          <p v-for="(para, idx) in readerParagraphs" :key="reader.current + ':' + idx">{{ para }}</p>
+          <nav class="chapter-nav">
+            <button class="chapter-nav-btn" :disabled="reader.current <= 0 || reader.loading" @click="prevChapter">‹ 上一章</button>
+            <span class="chapter-nav-pos">{{ reader.current + 1 }} / {{ reader.total }}</span>
+            <button class="chapter-nav-btn" :disabled="reader.current >= reader.total - 1 || reader.loading" @click="nextChapter">下一章 ›</button>
+          </nav>
+        </article>
+
+        <article class="reader-page markdown-body" v-if="reader.kind === 'md' && reader.mdHtml && !reader.error" v-html="reader.mdHtml"></article>
+      </div>
+
+      <!-- EPUB 独立原生挂载区（严禁放入 Vue ref/reactive 实例） -->
+      <div class="epub-stage" v-show="reader.kind === 'epub'" @click="onReaderStageTap" @touchstart.passive="onStageSwipeStart" @touchend="onStageSwipeEnd">
+        <div class="reader-status" v-if="reader.loading">
+          <div class="spinner"></div><span>正在流式载入 EPUB 电子书…</span>
+        </div>
+        <div class="reader-status error" v-else-if="reader.error">
+          <span>{{ reader.error }}</span>
+          <button class="secondary-btn" @click="retryReader">重试</button>
+        </div>
+        <button class="stage-arrow arrow-left" v-show="!reader.loading && !reader.error" @click="epubPrevPage" title="上一页" aria-label="上一页">‹</button>
+        <div id="epub-viewer-mount" class="epub-mount" :class="{ 'spread-single': prefs.epubSpread === 'none' }"></div>
+        <button class="stage-arrow arrow-right" v-show="!reader.loading && !reader.error" @click="epubNextPage" title="下一页" aria-label="下一页">›</button>
+      </div>
+
+      <!-- PDF 独立原生挂载区（严禁放入 Vue ref/reactive 实例） -->
+      <div class="pdf-stage" v-show="reader.kind === 'pdf'">
+        <div class="reader-status" v-if="reader.loading && !reader.pdfNativeMode">
+          <div class="spinner"></div><span>正在按 64KB 分块流式加载 PDF…</span>
+        </div>
+        <div class="reader-status error" v-else-if="reader.error && !reader.pdfNativeMode">
+          <span>{{ reader.error }}</span>
+          <div class="inline-row">
+            <button class="secondary-btn" @click="retryReader">重试</button>
+            <button class="primary-btn" @click="reader.pdfNativeMode = true">切换浏览器原生预览兜底</button>
+          </div>
+        </div>
+
+        <iframe
+          v-if="reader.pdfNativeMode && reader.book"
+          class="pdf-native-frame"
+          :class="{ 'pdf-night-filter': isPdfNightInverted }"
+          :src="'/api/raw?path=' + encodeURIComponent(reader.book.rel_key)"
+          title="PDF 原生预览">
+        </iframe>
+
+        <div class="pdf-canvas-scroller" v-show="!reader.pdfNativeMode && !reader.error" @click="onReaderStageTap" @touchstart.passive="onStageSwipeStart" @touchend="onStageSwipeEnd">
+          <canvas id="pdf-canvas-mount" class="pdf-canvas" :class="{ 'pdf-night-filter': isPdfNightInverted }"></canvas>
+        </div>
+
+        <div class="pdf-bottom-bar" :class="{ 'toolbar-hidden': !reader.toolbarVisible }" v-if="!reader.pdfNativeMode && reader.total > 0 && !reader.error" @click.stop>
+          <button class="chapter-nav-btn" :disabled="reader.current <= 1 || reader.pdfRendering" @click="pdfPrevPage">‹ 上一页</button>
+          <form class="pdf-page-form" @submit.prevent="jumpPdfPageInput">
+            <input type="number" min="1" :max="reader.total" v-model.number="reader.pdfPageInput" class="pdf-page-input" aria-label="页码">
+            <span class="chapter-nav-pos">/ {{ reader.total }} 页</span>
+            <button type="submit" class="secondary-btn small">跳转</button>
+          </form>
+          <button class="chapter-nav-btn" :disabled="reader.current >= reader.total || reader.pdfRendering" @click="pdfNextPage">下一页 ›</button>
+        </div>
+      </div>
+
+      <!-- Markdown 侧边浮动大纲 -->
+      <nav class="md-outline" v-if="reader.kind === 'md' && reader.mdToc.length > 0 && !reader.error">
+        <div class="md-outline-title">大纲</div>
+        <button v-for="h in reader.mdToc" :key="'o:' + h.id" class="md-outline-item" :class="['toc-level-' + h.level, { active: reader.activeHeading === h.id }]" @click="scrollToHeading(h.id)">{{ h.text }}</button>
+      </nav>
+
+      <div class="reader-progress" v-if="!reader.chmWeb"><template v-if="isPaged && !reader.loading && !reader.error">{{ reader.page + 1 }} / {{ reader.pages }} · </template>{{ Math.round(reader.progress) }}%</div>
+    </div>
+  </transition>
+
+  <!-- ===================== 设置中心弹窗 ===================== -->
+  <div class="modal-backdrop" v-if="settingsOpen" @click.self="closeSettings">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2>设置</h2>
+        <button class="icon-btn" @click="closeSettings" aria-label="关闭">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- 模块 A：后端宿主机媒体文件夹 -->
+        <section class="settings-section">
+          <div class="section-title">📁 媒体文件夹（服务器 / 宿主机）</div>
+          <p class="section-hint">以下路径位于运行 R-Book 后端的 Linux 主机上，而非当前浏览设备。</p>
+          <ul class="dir-list">
+            <li v-for="(dir, idx) in draft.media_dirs" :key="dir">
+              <span class="dir-path">{{ dir }}</span>
+              <button class="remove-btn" @click="removeMediaDir(idx)">移除</button>
+            </li>
+            <li v-if="draft.media_dirs.length === 0" class="dir-empty">尚未选择目录（保存后将自动回退至示例目录）</li>
+          </ul>
+          <button class="secondary-btn" v-if="!explorerOpen" @click="openExplorer">+ 从服务器/主机添加媒体文件夹</button>
+
+          <!-- 宿主机目录树浏览器 -->
+          <div class="host-explorer" v-if="explorerOpen">
+            <div class="explorer-toolbar">
+              <div class="shortcut-row">
+                <button class="shortcut" v-for="sc in explorerShortcuts" :key="sc" :class="{ active: explorer.current_path === sc }" @click="loadHostDir(sc)">{{ shortcutLabel(sc) }}</button>
+              </div>
+              <div class="explorer-path-row">
+                <button class="secondary-btn small" :disabled="!explorer.parent_path" @click="loadHostDir(explorer.parent_path)">⬆️ 返回上一级</button>
+                <div class="host-crumbs">
+                  <template v-for="(seg, idx) in hostCrumbs" :key="seg.path">
+                    <span class="crumb-sep" v-if="idx > 1">/</span>
+                    <button class="crumb" @click="loadHostDir(seg.path)">{{ seg.name }}</button>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <div class="explorer-current">
+              <span>当前：<code>{{ explorer.current_path }}</code></span>
+              <button class="pick-btn" :disabled="draft.media_dirs.includes(explorer.current_path)" @click="pickDir(explorer.current_path)">
+                {{ draft.media_dirs.includes(explorer.current_path) ? '已选中' : '✅ 选中当前目录' }}
+              </button>
+            </div>
+
+            <div class="explorer-list">
+              <div class="explorer-loading" v-if="explorerLoading"><div class="spinner small"></div> 读取宿主机目录…</div>
+              <div class="explorer-warning" v-else-if="explorer.warning">{{ explorer.warning }}</div>
+              <template v-if="!explorerLoading">
+                <div class="explorer-row" v-for="d in explorer.dirs" :key="d.path">
+                  <button class="explorer-name" @click="loadHostDir(d.path)">
+                    <span>📁</span><span class="explorer-label">{{ d.name }}</span><span class="chevron" v-if="d.has_subdirs">›</span>
+                  </button>
+                  <button class="pick-btn" :disabled="draft.media_dirs.includes(d.path)" @click="pickDir(d.path)">
+                    {{ draft.media_dirs.includes(d.path) ? '已选中' : '✅ 选中此目录' }}
+                  </button>
+                </div>
+                <div class="explorer-empty" v-if="explorer.dirs.length === 0 && !explorer.warning">此目录下没有可访问的子文件夹</div>
+              </template>
+            </div>
+            <div class="explorer-footer">
+              <button class="secondary-btn small" @click="explorerOpen = false">收起目录浏览器</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 模块 B：云盘受限模式开关 -->
+        <section class="settings-section">
+          <div class="section-title-row">
+            <div class="section-title">云盘受限模式 (Cloud Restricted Mode)</div>
+            <button class="switch" role="switch" :aria-checked="draft.cloud_restricted_mode" :class="{ on: draft.cloud_restricted_mode }" @click="draft.cloud_restricted_mode = !draft.cloud_restricted_mode">
+              <span class="switch-knob"></span>
+            </button>
+          </div>
+          <div class="mode-desc" :class="draft.cloud_restricted_mode ? 'cloud' : 'local'">
+            <template v-if="draft.cloud_restricted_mode">☁️ 云盘受限保护中（零预读 / 防阻塞 / 4秒超时熔断 / 保护 Google Drive API）</template>
+            <template v-else>⚡ 本地磁盘满血模式（后台自动提取全部 EPUB 封面 / 书架自动渲染 PDF 首页真封面）</template>
+          </div>
+        </section>
+
+        <!-- 模块 C：跨设备进度同步 -->
+        <section class="settings-section">
+          <div class="section-title">🔄 跨设备进度双向同步</div>
+          <label class="field-label" for="peer-url">对端服务器 URL</label>
+          <div class="inline-row">
+            <input id="peer-url" class="text-input" type="url" v-model.trim="draft.peer_sync_url" placeholder="http://100.98.229.9:8001">
+            <button class="secondary-btn" :disabled="syncing" @click="syncNowFromSettings">{{ syncing ? '同步中…' : '立即双向同步' }}</button>
+          </div>
+          <div class="inline-row wrap">
+            <button class="secondary-btn" @click="exportProgress">⬇️ 导出进度 JSON</button>
+            <button class="secondary-btn" @click="importOpen = !importOpen">⬆️ 导入进度 JSON</button>
+          </div>
+          <div class="import-box" v-if="importOpen">
+            <textarea class="text-area" v-model="importText" placeholder='粘贴导出的进度 JSON，例如 {"state": {...}}'></textarea>
+            <div class="inline-row">
+              <button class="secondary-btn" @click="importProgress">合并导入（按时间戳保留较新项）</button>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="modal-footer">
+        <button class="secondary-btn" @click="closeSettings">取消</button>
+        <button class="primary-btn" :disabled="savingConfig" @click="saveSettings">{{ savingConfig ? '保存中…' : '保存设置并刷新书库' }}</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast 提示 -->
+  <transition name="toast-fade">
+    <div class="toast" v-if="toast.show" :class="toast.type">{{ toast.message }}</div>
+  </transition>
+</div>
+
+<script src="/static/js/app.js?v=20261115wrap"></script>
+</body>
+</html>
