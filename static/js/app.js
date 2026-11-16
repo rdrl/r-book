@@ -1540,7 +1540,7 @@
         swipe = null;
       }
 
-      /* EPUB 外框与 PDF 画布区的轻扫翻页手势（放大横向溢出时自动让位给画布平移） */
+      /* EPUB 外框与 PDF 画布区的跟手轻扫翻页手势（放大横向溢出时自动让位给画布平移） */
       function onStageSwipeStart(e) {
         stageSwipe = null;
         if (!reader.open || !e.touches || e.touches.length !== 1 || reader.loading) return;
@@ -1550,7 +1550,23 @@
           if (scroller && scroller.scrollWidth > scroller.clientWidth + 6) return;
         }
         const p = e.touches[0];
-        stageSwipe = { x: p.clientX, y: p.clientY, t: Date.now() };
+        stageSwipe = { x: p.screenX, y: p.screenY, dx: 0, dir: "", t: Date.now() };
+      }
+
+      function onStageSwipeMove(e) {
+        if (!stageSwipe || !e.touches || e.touches.length !== 1) return;
+        const p = e.touches[0];
+        const dx = p.screenX - stageSwipe.x;
+        const dy = p.screenY - stageSwipe.y;
+        if (!stageSwipe.dir) {
+          if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+          stageSwipe.dir = Math.abs(dx) > Math.abs(dy) * 1.15 ? "h" : "v";
+        }
+        if (stageSwipe.dir !== "h") return;
+        stageSwipe.dx = dx;
+        if (reader.kind === "epub") {
+          setEpubMountTransform(dx * 0.85, 1, 0);
+        }
       }
 
       function onStageSwipeEnd(e) {
@@ -1558,15 +1574,25 @@
         stageSwipe = null;
         if (!s || !e.changedTouches || !e.changedTouches.length) return;
         const p = e.changedTouches[0];
-        const dx = p.clientX - s.x;
-        const dy = p.clientY - s.y;
+        const dx = p.screenX - s.x;
+        const dy = p.screenY - s.y;
         const dt = Math.max(1, Date.now() - s.t);
-        if (Math.abs(dx) <= Math.abs(dy) * 1.25) return;
-        if (Math.abs(dx) > 48 || (Math.abs(dx) > 20 && Math.abs(dx) / dt > 0.35)) {
+        if (s.dir === "v" || Math.abs(dx) <= Math.abs(dy) * 1.15) {
+          if (reader.kind === "epub") setEpubMountTransform(0, 1, 180);
+          return;
+        }
+        if (Math.abs(dx) > 42 || (Math.abs(dx) > 16 && Math.abs(dx) / dt > 0.3)) {
           suppressTapUntil = Date.now() + 420;
           if (reader.aaOpen) reader.aaOpen = false;
-          if (dx < 0) readerNextAction(false);
-          else readerPrevAction(false);
+          if (reader.toolbarVisible) reader.toolbarVisible = false;
+          if (reader.kind === "epub") {
+            animateEpubTurn(dx < 0 ? "next" : "prev", dx);
+          } else {
+            if (dx < 0) readerNextAction(false);
+            else readerPrevAction(false);
+          }
+        } else if (reader.kind === "epub") {
+          setEpubMountTransform(0, 1, 180);
         }
       }
 
@@ -1996,46 +2022,12 @@
             scheduleSave();
           });
 
-          /* EPUB iframe 内部键盘快捷键与三区点击手势透传 */
+          /* EPUB 键盘快捷键支持 */
           rendition.on("keyup", (ev) => {
             if (!ev) return;
             if (ev.key === "ArrowLeft") epubPrevPage();
             else if (ev.key === "ArrowRight") epubNextPage();
             else if (ev.key === "Escape") closeReader();
-          });
-
-          let epubTouch = null;
-          rendition.on("touchstart", (ev) => {
-            if (!ev || !ev.changedTouches || ev.changedTouches.length !== 1) { epubTouch = null; return; }
-            const t = ev.changedTouches[0];
-            epubTouch = { x: t.screenX, y: t.screenY, time: Date.now() };
-          });
-          rendition.on("touchend", (ev) => {
-            if (!epubTouch || !ev || !ev.changedTouches || !ev.changedTouches.length) { epubTouch = null; return; }
-            const t = ev.changedTouches[0];
-            const dx = t.screenX - epubTouch.x;
-            const dy = t.screenY - epubTouch.y;
-            const dt = Math.max(1, Date.now() - epubTouch.time);
-            epubTouch = null;
-            if (Math.abs(dx) <= Math.abs(dy) * 1.25) return;
-            const sel = ev.view && ev.view.getSelection ? String(ev.view.getSelection()).trim() : "";
-            if (sel) return;
-            if (Math.abs(dx) > 45 || (Math.abs(dx) > 20 && Math.abs(dx) / dt > 0.35)) {
-              suppressTapUntil = Date.now() + 450;
-              if (reader.aaOpen) reader.aaOpen = false;
-              if (reader.toolbarVisible) reader.toolbarVisible = false;
-              if (dx < 0) epubNextPage();
-              else epubPrevPage();
-            }
-          });
-
-          rendition.on("click", (ev) => {
-            if (!ev || Date.now() < suppressTapUntil) return;
-            const viewW = (ev.view && ev.view.innerWidth) || window.innerWidth || 1;
-            const ratio = ev.clientX / viewW;
-            if (ratio < 0.3333) epubPrevPage();
-            else if (ratio > 0.6667) epubNextPage();
-            else reader.toolbarVisible = !reader.toolbarVisible;
           });
 
           if (initialCfiOrHref) {
@@ -2075,15 +2067,58 @@
         }
       }
 
-      function epubPrevPage() {
-        if (epubRenditionInstance) {
-          try { epubRenditionInstance.prev(); } catch (_e) { /* ignore */ }
+      let epubTurning = false;
+
+      function setEpubMountTransform(tx, op, durMs) {
+        const el = document.getElementById("epub-viewer-mount");
+        if (!el) return;
+        el.style.setProperty("--epub-dur", (durMs || 0) + "ms");
+        el.style.setProperty("--epub-tx", Math.round(tx || 0) + "px");
+        el.style.setProperty("--epub-op", op === undefined ? "1" : String(op));
+      }
+
+      async function animateEpubTurn(dir) {
+        if (!epubRenditionInstance || epubTurning) return;
+        epubTurning = true;
+        const isNext = dir === "next";
+        const inShift = isNext ? 26 : -26;
+        try {
+          if (isNext) await epubRenditionInstance.next();
+          else await epubRenditionInstance.prev();
+          setEpubMountTransform(inShift, 0.42, 0);
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          setEpubMountTransform(0, 1, 180);
+        } catch (_e) {
+          setEpubMountTransform(0, 1, 0);
+        } finally {
+          setTimeout(() => { epubTurning = false; }, 110);
         }
       }
 
+      function epubPrevPage() {
+        animateEpubTurn("prev");
+      }
+
       function epubNextPage() {
-        if (epubRenditionInstance) {
-          try { epubRenditionInstance.next(); } catch (_e) { /* ignore */ }
+        animateEpubTurn("next");
+      }
+
+      function onEpubTap(e) {
+        if (!reader.open || reader.kind !== "epub" || reader.loading || reader.error || !e) return;
+        if (reader.aaOpen) {
+          reader.aaOpen = false;
+          return;
+        }
+        const viewW = window.innerWidth || document.documentElement.clientWidth || 1;
+        const ratio = e.clientX / viewW;
+        if (ratio < 0.3333) {
+          if (reader.toolbarVisible) reader.toolbarVisible = false;
+          epubPrevPage();
+        } else if (ratio > 0.6667) {
+          if (reader.toolbarVisible) reader.toolbarVisible = false;
+          epubNextPage();
+        } else {
+          reader.toolbarVisible = !reader.toolbarVisible;
         }
       }
 
@@ -3106,7 +3141,7 @@
         readerThemes, readerFonts, readerWidthOptions, prefs, reader, readerScrollEl,
         isPaged,
         onReaderTouchStart, onReaderTouchEnd, onReaderTouchCancel,
-        onStageSwipeStart, onStageSwipeEnd,
+        onStageSwipeStart, onStageSwipeMove, onStageSwipeEnd, onEpubTap,
         readerStyle, readerParagraphs, filteredChapters, filteredMdToc,
         filteredEpubToc, filteredPdfToc, tocTotalCount, tocFilteredCount,
         isPdfNightInverted, readerSubtitle,
